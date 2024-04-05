@@ -191,6 +191,13 @@ impl net::DeviceOperations for NetDevice {
 
     fn stop(_dev: &net::Device, _data: &NetDevicePrvData) -> Result {
         pr_info!("Rust for linux e1000 driver demo (net device stop)\n");
+        _dev.netif_stop_queue();
+        _dev.netif_carrier_off();
+        _data.napi.disable();
+        let irq_ptr = _data._irq_handler.load(core::sync::atomic::Ordering::Relaxed);
+        unsafe{ drop(Box::from_raw(irq_ptr)); }
+        // drop(_data._irq_handler.load(core::sync::atomic::Ordering::Relaxed));
+        drop(_data);
         Ok(())
     }
 
@@ -293,11 +300,13 @@ impl kernel::irq::Handler for E1000InterruptHandler {
 /// the private data for the adapter
 struct E1000DrvPrvData {
     _netdev_reg: net::Registration<NetDevice>,
+    _bars: i32,
 }
 
 impl driver::DeviceRemoval for E1000DrvPrvData {
     fn device_remove(&self) {
         pr_info!("Rust for linux e1000 driver demo (device_remove)\n");
+        drop(&self._netdev_reg);
     }
 }
 
@@ -365,7 +374,6 @@ impl pci::Driver for E1000Drv {
         (pci::DeviceId::new(E1000_VENDER_ID, E1000_DEVICE_ID), None),
     ]}
 
-
     fn probe(dev: &mut pci::Device, id: core::option::Option<&Self::IdInfo>) -> Result<Self::Data> {
         pr_info!("Rust for linux e1000 driver demo (probe): {:?}\n", id);
 
@@ -375,10 +383,10 @@ impl pci::Driver for E1000Drv {
         // some of them are mmio, others are io-port based. The params to the following function is a 
         // filter condition, and the return value is a mask indicating which of those bars are selected.
         let bars = dev.select_bars((bindings::IORESOURCE_MEM | bindings::IORESOURCE_IO) as u64);
-
+        pr_info!("IRQQQQQ\n");
         // the underlying will call `pci_enable_device()`. the R4L framework doesn't support `pci_enable_device_memory()` now.
         dev.enable_device()?;
-
+        pr_info!("IRQQQQQ\n");
         // ask the os to reserve the physical memory region of the selected bars.
         dev.request_selected_regions(bars, c_str!("e1000 reserved memory"))?;
 
@@ -429,8 +437,9 @@ impl pci::Driver for E1000Drv {
 
         // TODO: Some background tasks and Wake on LAN are not supported now.
 
+        
         let irq = dev.irq();
-
+        
         let common_dev = device::Device::from_dev(dev);
 
         netdev.netif_carrier_off();
@@ -462,12 +471,16 @@ impl pci::Driver for E1000Drv {
             E1000DrvPrvData{
                 // Must hold this registration, or the device will be removed.
                 _netdev_reg: netdev_reg,
+                _bars: bars,
             }
         )?)
     }
 
-    fn remove(data: &Self::Data) {
+    fn remove(dev: &mut pci::Device, data: &Self::Data) {
         pr_info!("Rust for linux e1000 driver demo (remove)\n");
+        dev.release_selected_regions(data._bars);
+        dev.disable_device();
+        drop(data);
     }
 }
 struct E1000KernelMod {
